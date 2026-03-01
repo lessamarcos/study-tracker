@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Calendar, Clock, BookOpen, CheckSquare, TrendingUp, Plus, Trash2, FileText, Target, Award, BarChart3, Flame, Download, Edit2, Check, X, LogOut } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Calendar, Clock, BookOpen, CheckSquare, TrendingUp, Plus, Trash2, FileText, Target, Award, BarChart3, Flame, Download, Edit2, Check, X, LogOut, Play, Pause, RotateCcw, Timer, Trophy, Bell } from 'lucide-react';
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 // Firebase imports
@@ -23,15 +23,40 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const provider = new GoogleAuthProvider();
 
+// Achievements definition
+const ACHIEVEMENTS = [
+  { id: 'first_session', name: 'Primeiro Passo', description: 'Complete sua primeira sessão', icon: '🎯', requirement: 1, type: 'sessions' },
+  { id: 'week_streak', name: 'Semana Completa', description: '7 dias consecutivos estudando', icon: '🔥', requirement: 7, type: 'streak' },
+  { id: 'hours_10', name: 'Maratonista', description: 'Complete 10 horas de estudo', icon: '⏱️', requirement: 600, type: 'minutes' },
+  { id: 'hours_50', name: 'Dedicado', description: 'Complete 50 horas de estudo', icon: '💪', requirement: 3000, type: 'minutes' },
+  { id: 'hours_100', name: 'Mestre', description: 'Complete 100 horas de estudo', icon: '👑', requirement: 6000, type: 'minutes' },
+  { id: 'exercises_50', name: 'Praticante', description: 'Resolva 50 exercícios', icon: '✍️', requirement: 50, type: 'exercises' },
+  { id: 'exercises_100', name: 'Expert', description: 'Resolva 100 exercícios', icon: '🎓', requirement: 100, type: 'exercises' },
+  { id: 'month_streak', name: 'Mês Perfeito', description: '30 dias consecutivos', icon: '🌟', requirement: 30, type: 'streak' },
+  { id: 'early_bird', name: 'Madrugador', description: 'Estude antes das 7h', icon: '🌅', requirement: 1, type: 'special' },
+  { id: 'night_owl', name: 'Coruja', description: 'Estude depois das 22h', icon: '🦉', requirement: 1, type: 'special' },
+];
+
 export default function StudyTracker() {
   const [user, setUser] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [topics, setTopics] = useState([]);
+  const [goals, setGoals] = useState({ daily: 120, weekly: 600 }); // em minutos
+  const [achievements, setAchievements] = useState([]);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [showTopicForm, setShowTopicForm] = useState(false);
+  const [showGoalsModal, setShowGoalsModal] = useState(false);
+  const [showAchievementNotification, setShowAchievementNotification] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editingTopic, setEditingTopic] = useState(null);
+
+  // Pomodoro Timer States
+  const [pomodoroTime, setPomodoroTime] = useState(25 * 60); // 25 minutes in seconds
+  const [pomodoroRunning, setPomodoroRunning] = useState(false);
+  const [pomodoroTopic, setPomodoroTopic] = useState('');
+  const [pomodoroStartTime, setPomodoroStartTime] = useState(null);
+  const timerRef = useRef(null);
 
   const [sessionForm, setSessionForm] = useState({
     date: new Date().toISOString().split('T')[0],
@@ -58,7 +83,7 @@ export default function StudyTracker() {
     return () => unsubscribe();
   }, []);
 
-  // Load data from Firestore when user logs in
+  // Load data from Firestore
   useEffect(() => {
     if (!user) return;
 
@@ -69,14 +94,42 @@ export default function StudyTracker() {
         const data = docSnapshot.data();
         setSessions(data.sessions || []);
         setTopics(data.topics || []);
+        setGoals(data.goals || { daily: 120, weekly: 600 });
+        setAchievements(data.achievements || []);
       }
     });
 
     return () => unsubscribe();
   }, [user]);
 
+  // Check for new achievements whenever sessions change
+  useEffect(() => {
+    if (sessions.length > 0 && user) {
+      checkAchievements();
+    }
+  }, [sessions]);
+
+  // Pomodoro Timer Effect
+  useEffect(() => {
+    if (pomodoroRunning && pomodoroTime > 0) {
+      timerRef.current = setInterval(() => {
+        setPomodoroTime(prev => {
+          if (prev <= 1) {
+            handlePomodoroComplete();
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      clearInterval(timerRef.current);
+    }
+
+    return () => clearInterval(timerRef.current);
+  }, [pomodoroRunning, pomodoroTime]);
+
   // Save data to Firestore
-  const saveToFirebase = async (newSessions, newTopics) => {
+  const saveToFirebase = async (newSessions, newTopics, newGoals = goals, newAchievements = achievements) => {
     if (!user) return;
 
     try {
@@ -84,6 +137,8 @@ export default function StudyTracker() {
       await setDoc(userDocRef, {
         sessions: newSessions,
         topics: newTopics,
+        goals: newGoals,
+        achievements: newAchievements,
         lastUpdated: new Date().toISOString()
       });
     } catch (error) {
@@ -91,7 +146,122 @@ export default function StudyTracker() {
     }
   };
 
-  // Login with Google
+  // Check and unlock achievements
+  const checkAchievements = () => {
+    const newAchievements = [];
+    const totalMinutes = sessions.reduce((sum, s) => sum + s.duration, 0);
+    const totalExercises = sessions.reduce((sum, s) => sum + s.exercises, 0);
+    const currentStreak = calculateStreak().current;
+
+    ACHIEVEMENTS.forEach(achievement => {
+      if (achievements.includes(achievement.id)) return; // Already unlocked
+
+      let unlocked = false;
+
+      switch (achievement.type) {
+        case 'sessions':
+          unlocked = sessions.length >= achievement.requirement;
+          break;
+        case 'minutes':
+          unlocked = totalMinutes >= achievement.requirement;
+          break;
+        case 'exercises':
+          unlocked = totalExercises >= achievement.requirement;
+          break;
+        case 'streak':
+          unlocked = currentStreak >= achievement.requirement;
+          break;
+        case 'special':
+          // Check for special achievements
+          if (achievement.id === 'early_bird') {
+            unlocked = sessions.some(s => {
+              const hour = new Date(s.date + 'T06:00:00').getHours();
+              return hour < 7;
+            });
+          }
+          if (achievement.id === 'night_owl') {
+            unlocked = sessions.some(s => {
+              const hour = new Date(s.date + 'T22:00:00').getHours();
+              return hour >= 22;
+            });
+          }
+          break;
+      }
+
+      if (unlocked) {
+        newAchievements.push(achievement.id);
+        // Show notification
+        setShowAchievementNotification(achievement);
+        setTimeout(() => setShowAchievementNotification(null), 5000);
+      }
+    });
+
+    if (newAchievements.length > 0) {
+      const updatedAchievements = [...achievements, ...newAchievements];
+      setAchievements(updatedAchievements);
+      saveToFirebase(sessions, topics, goals, updatedAchievements);
+    }
+  };
+
+  // Pomodoro handlers
+  const startPomodoro = () => {
+    if (!pomodoroTopic) {
+      alert('Selecione um tópico primeiro!');
+      return;
+    }
+    setPomodoroRunning(true);
+    setPomodoroStartTime(Date.now());
+  };
+
+  const pausePomodoro = () => {
+    setPomodoroRunning(false);
+  };
+
+  const resetPomodoro = () => {
+    setPomodoroRunning(false);
+    setPomodoroTime(25 * 60);
+    setPomodoroStartTime(null);
+  };
+
+  const handlePomodoroComplete = () => {
+    setPomodoroRunning(false);
+
+    // Play notification sound (browser notification)
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification('Pomodoro Completo! 🎉', {
+        body: 'Sessão de estudo finalizada. Faça uma pausa!',
+        icon: '/favicon.ico'
+      });
+    }
+
+    // Auto-save session
+    const duration = Math.round((Date.now() - pomodoroStartTime) / 1000 / 60); // minutes
+    const newSession = {
+      id: Date.now(),
+      date: new Date().toISOString().split('T')[0],
+      topicId: pomodoroTopic,
+      duration: duration,
+      exercises: 0,
+      pages: 0,
+      notes: 'Sessão Pomodoro'
+    };
+
+    const updatedSessions = [newSession, ...sessions];
+    setSessions(updatedSessions);
+    saveToFirebase(updatedSessions, topics);
+
+    alert('Pomodoro completo! Sessão salva automaticamente.');
+    resetPomodoro();
+  };
+
+  // Request notification permission
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Login/Logout
   const handleLogin = async () => {
     try {
       await signInWithPopup(auth, provider);
@@ -100,12 +270,12 @@ export default function StudyTracker() {
     }
   };
 
-  // Logout
   const handleLogout = async () => {
     try {
       await signOut(auth);
       setSessions([]);
       setTopics([]);
+      setAchievements([]);
     } catch (error) {
       console.error('Erro no logout:', error);
     }
@@ -181,6 +351,41 @@ export default function StudyTracker() {
     saveToFirebase(sessions, updatedTopics);
   };
 
+  // Goals handler
+  const handleGoalsSubmit = (e) => {
+    e.preventDefault();
+    saveToFirebase(sessions, topics, goals);
+    setShowGoalsModal(false);
+  };
+
+  // Calculate daily progress
+  const getDailyProgress = () => {
+    const today = new Date().toISOString().split('T')[0];
+    const todaySessions = sessions.filter(s => s.date === today);
+    const totalMinutes = todaySessions.reduce((sum, s) => sum + s.duration, 0);
+    return {
+      current: totalMinutes,
+      goal: goals.daily,
+      percentage: Math.min((totalMinutes / goals.daily) * 100, 100)
+    };
+  };
+
+  // Calculate weekly progress
+  const getWeeklyProgress = () => {
+    const today = new Date();
+    const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const weekSessions = sessions.filter(s => {
+      const sessionDate = new Date(s.date);
+      return sessionDate >= weekAgo && sessionDate <= today;
+    });
+    const totalMinutes = weekSessions.reduce((sum, s) => sum + s.duration, 0);
+    return {
+      current: totalMinutes,
+      goal: goals.weekly,
+      percentage: Math.min((totalMinutes / goals.weekly) * 100, 100)
+    };
+  };
+
   // Statistics
   const stats = {
     totalDays: sessions.length,
@@ -226,6 +431,8 @@ export default function StudyTracker() {
   };
 
   const streak = calculateStreak();
+  const dailyProgress = getDailyProgress();
+  const weeklyProgress = getWeeklyProgress();
 
   // Charts data
   const getLast7DaysData = () => {
@@ -302,7 +509,8 @@ export default function StudyTracker() {
         }).reduce((sum, s) => sum + s.exercises, 0),
       },
       streak,
-      topTopics: getTopicDistribution().slice(0, 5)
+      topTopics: getTopicDistribution().slice(0, 5),
+      achievements: ACHIEVEMENTS.filter(a => achievements.includes(a.id))
     };
 
     const report = `
@@ -327,6 +535,12 @@ Período: ${reportData.period}
 
 • Sequência atual: ${reportData.streak.current} dias
 • Melhor sequência: ${reportData.streak.best} dias
+
+───────────────────────────────────────────
+🏆 CONQUISTAS DESBLOQUEADAS
+───────────────────────────────────────────
+
+${reportData.achievements.map(a => `${a.icon} ${a.name} - ${a.description}`).join('\n')}
 
 ───────────────────────────────────────────
 📖 TÓPICOS MAIS ESTUDADOS
@@ -363,6 +577,12 @@ Continue estudando e evoluindo! 🚀
     if (hours === 0) return `${mins}min`;
     if (mins === 0) return `${hours}h`;
     return `${hours}h ${mins}min`;
+  };
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
   const COLORS = ['#3B82F6', '#8B5CF6', '#EC4899', '#10B981', '#F59E0B', '#EF4444'];
@@ -411,6 +631,76 @@ Continue estudando e evoluindo! 🚀
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100">
+      {/* Achievement Notification */}
+      {showAchievementNotification && (
+        <div className="fixed top-4 right-4 z-50 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-xl p-4 shadow-2xl animate-bounce">
+          <div className="flex items-center gap-3">
+            <Trophy size={32} className="text-yellow-100" />
+            <div>
+              <div className="font-bold text-white">Nova Conquista Desbloqueada! 🎉</div>
+              <div className="text-yellow-100 text-sm">{showAchievementNotification.icon} {showAchievementNotification.name}</div>
+              <div className="text-yellow-200 text-xs">{showAchievementNotification.description}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Goals Modal */}
+      {showGoalsModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-40 p-4">
+          <div className="bg-gray-800 rounded-xl p-6 max-w-md w-full border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4">Configurar Metas</h2>
+            <form onSubmit={handleGoalsSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Meta Diária (minutos)
+                </label>
+                <input
+                  type="number"
+                  value={goals.daily}
+                  onChange={(e) => setGoals({...goals, daily: parseInt(e.target.value)})}
+                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-100"
+                  min="0"
+                  required
+                />
+                <p className="text-xs text-gray-400 mt-1">{Math.floor(goals.daily / 60)}h {goals.daily % 60}min por dia</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Meta Semanal (minutos)
+                </label>
+                <input
+                  type="number"
+                  value={goals.weekly}
+                  onChange={(e) => setGoals({...goals, weekly: parseInt(e.target.value)})}
+                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-100"
+                  min="0"
+                  required
+                />
+                <p className="text-xs text-gray-400 mt-1">{Math.floor(goals.weekly / 60)}h {goals.weekly % 60}min por semana</p>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  type="submit"
+                  className="flex-1 px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 rounded-lg font-semibold transition-all"
+                >
+                  Salvar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowGoalsModal(false)}
+                  className="flex-1 px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-semibold transition-all"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-gray-800 border-b border-gray-700 sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 py-4">
@@ -454,6 +744,20 @@ Continue estudando e evoluindo! 🚀
             </button>
 
             <button
+              onClick={() => setActiveTab('pomodoro')}
+              className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap ${
+                activeTab === 'pomodoro'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <Timer size={18} />
+                Pomodoro
+              </div>
+            </button>
+
+            <button
               onClick={() => setActiveTab('sessions')}
               className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap ${
                 activeTab === 'sessions'
@@ -478,6 +782,20 @@ Continue estudando e evoluindo! 🚀
               <div className="flex items-center gap-2">
                 <Target size={18} />
                 Metas
+              </div>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('achievements')}
+              className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap ${
+                activeTab === 'achievements'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <Trophy size={18} />
+                Conquistas
               </div>
             </button>
 
@@ -538,18 +856,96 @@ Continue estudando e evoluindo! 🚀
               </div>
             </div>
 
-            {/* Cloud Sync Badge */}
-            <div className="bg-gradient-to-r from-green-600 to-emerald-600 rounded-xl p-4 shadow-lg">
-              <div className="flex items-center gap-3">
-                <div className="bg-white bg-opacity-20 rounded-full p-2">
-                  <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
-                  </svg>
+            {/* Goals Progress */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Daily Goal */}
+              <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-lg font-bold flex items-center gap-2">
+                    <Target size={20} />
+                    Meta Diária
+                  </h3>
+                  <button
+                    onClick={() => setShowGoalsModal(true)}
+                    className="text-blue-400 hover:text-blue-300 text-sm"
+                  >
+                    Editar
+                  </button>
                 </div>
-                <div>
-                  <div className="font-bold text-white">Sincronizado na Nuvem</div>
-                  <div className="text-green-100 text-sm">Seus dados estão salvos e acessíveis de qualquer lugar ☁️</div>
+
+                <div className="mb-2">
+                  <div className="flex justify-between text-sm mb-1">
+                    <span>{formatHours(dailyProgress.current)}</span>
+                    <span className="text-gray-400">{formatHours(dailyProgress.goal)}</span>
+                  </div>
+                  <div className="w-full bg-gray-700 rounded-full h-4">
+                    <div
+                      className="bg-gradient-to-r from-green-500 to-emerald-500 h-4 rounded-full transition-all flex items-center justify-end px-2"
+                      style={{width: `${dailyProgress.percentage}%`}}
+                    >
+                      {dailyProgress.percentage >= 20 && (
+                        <span className="text-xs font-bold text-white">{Math.round(dailyProgress.percentage)}%</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
+
+                {dailyProgress.percentage >= 100 && (
+                  <div className="text-green-400 text-sm font-medium flex items-center gap-1 mt-2">
+                    <Check size={16} />
+                    Meta cumprida hoje! 🎉
+                  </div>
+                )}
+                {dailyProgress.percentage < 100 && (
+                  <div className="text-gray-400 text-sm mt-2">
+                    Faltam {formatHours(dailyProgress.goal - dailyProgress.current)} para atingir a meta
+                  </div>
+                )}
+              </div>
+
+              {/* Weekly Goal */}
+              <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-lg font-bold flex items-center gap-2">
+                    <Calendar size={20} />
+                    Meta Semanal
+                  </h3>
+                  <button
+                    onClick={() => setShowGoalsModal(true)}
+                    className="text-blue-400 hover:text-blue-300 text-sm"
+                  >
+                    Editar
+                  </button>
+                </div>
+
+                <div className="mb-2">
+                  <div className="flex justify-between text-sm mb-1">
+                    <span>{formatHours(weeklyProgress.current)}</span>
+                    <span className="text-gray-400">{formatHours(weeklyProgress.goal)}</span>
+                  </div>
+                  <div className="w-full bg-gray-700 rounded-full h-4">
+                    <div
+                      className="bg-gradient-to-r from-blue-500 to-purple-500 h-4 rounded-full transition-all flex items-center justify-end px-2"
+                      style={{width: `${weeklyProgress.percentage}%`}}
+                    >
+                      {weeklyProgress.percentage >= 20 && (
+                        <span className="text-xs font-bold text-white">{Math.round(weeklyProgress.percentage)}%</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {weeklyProgress.percentage >= 100 && (
+                  <div className="text-blue-400 text-sm font-medium flex items-center gap-1 mt-2">
+                    <Check size={16} />
+                    Meta semanal cumprida! 🎉
+                  </div>
+                )}
+                {weeklyProgress.percentage < 100 && (
+                  <div className="text-gray-400 text-sm mt-2">
+                    Faltam {formatHours(weeklyProgress.goal - weeklyProgress.current)} nesta semana
+                  </div>
+                )}
               </div>
             </div>
 
@@ -569,6 +965,14 @@ Continue estudando e evoluindo! 🚀
             {/* Quick Actions */}
             <div className="flex flex-wrap gap-3">
               <button
+                onClick={() => setActiveTab('pomodoro')}
+                className="flex-1 min-w-[200px] px-6 py-4 bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-700 hover:to-orange-700 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+              >
+                <Timer size={20} />
+                Iniciar Pomodoro
+              </button>
+
+              <button
                 onClick={() => {
                   setShowSessionForm(true);
                   setActiveTab('sessions');
@@ -587,6 +991,32 @@ Continue estudando e evoluindo! 🚀
                 Exportar Relatório
               </button>
             </div>
+
+            {/* Recent Achievements */}
+            {achievements.length > 0 && (
+              <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+                <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+                  <Trophy size={24} />
+                  Conquistas Recentes
+                </h2>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {ACHIEVEMENTS.filter(a => achievements.includes(a.id)).slice(-4).map(achievement => (
+                    <div key={achievement.id} className="bg-gradient-to-br from-yellow-600 to-orange-600 rounded-lg p-4 text-center">
+                      <div className="text-4xl mb-2">{achievement.icon}</div>
+                      <div className="text-sm font-bold text-white">{achievement.name}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  onClick={() => setActiveTab('achievements')}
+                  className="mt-4 w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm transition-all"
+                >
+                  Ver Todas ({achievements.length}/{ACHIEVEMENTS.length})
+                </button>
+              </div>
+            )}
 
             {/* Recent Sessions Preview */}
             <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
@@ -622,29 +1052,111 @@ Continue estudando e evoluindo! 🚀
                 </div>
               )}
             </div>
+          </div>
+        )}
 
-            {/* Topics Progress */}
-            <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
-              <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-                <Target size={24} />
-                Progresso das Metas
-              </h2>
+        {/* Pomodoro Tab */}
+        {activeTab === 'pomodoro' && (
+          <div className="max-w-2xl mx-auto space-y-6">
+            <div className="bg-gray-800 rounded-xl p-8 border border-gray-700">
+              <h2 className="text-2xl font-bold mb-6 text-center">⏱️ Timer Pomodoro</h2>
 
-              <div className="space-y-3">
-                {topics.filter(t => t.status === 'inProgress').slice(0, 5).map(topic => (
-                  <div key={topic.id} className="flex items-center gap-3">
-                    <div className="w-3 h-3 rounded-full" style={{backgroundColor: topic.color}}></div>
-                    <div className="flex-1">
-                      <div className="font-medium">{topic.name}</div>
-                      <div className="text-sm text-gray-400">{topic.category}</div>
-                    </div>
-                    <div className="text-sm text-gray-400">Em progresso</div>
+              {/* Timer Display */}
+              <div className="text-center mb-8">
+                <div className="text-8xl font-bold bg-gradient-to-r from-red-400 to-orange-500 bg-clip-text text-transparent mb-4">
+                  {formatTime(pomodoroTime)}
+                </div>
+
+                <div className="text-gray-400 mb-6">
+                  {pomodoroRunning ? '⏳ Em execução...' : pomodoroTime === 0 ? '✅ Completo!' : '⏸️ Pausado'}
+                </div>
+              </div>
+
+              {/* Topic Selection */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-300 mb-2">Estudando</label>
+                <select
+                  value={pomodoroTopic}
+                  onChange={(e) => setPomodoroTopic(e.target.value)}
+                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-100 text-lg"
+                  disabled={pomodoroRunning}
+                >
+                  <option value="">Selecione um tópico</option>
+                  {topics.map(topic => (
+                    <option key={topic.id} value={topic.id}>{topic.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Controls */}
+              <div className="flex gap-3 justify-center mb-6">
+                {!pomodoroRunning ? (
+                  <button
+                    onClick={startPomodoro}
+                    disabled={pomodoroTime === 0}
+                    className="px-8 py-4 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 disabled:from-gray-600 disabled:to-gray-600 rounded-lg font-semibold transition-all flex items-center gap-2 shadow-lg text-lg"
+                  >
+                    <Play size={24} />
+                    Iniciar
+                  </button>
+                ) : (
+                  <button
+                    onClick={pausePomodoro}
+                    className="px-8 py-4 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-700 hover:to-orange-700 rounded-lg font-semibold transition-all flex items-center gap-2 shadow-lg text-lg"
+                  >
+                    <Pause size={24} />
+                    Pausar
+                  </button>
+                )}
+
+                <button
+                  onClick={resetPomodoro}
+                  className="px-8 py-4 bg-gray-700 hover:bg-gray-600 rounded-lg font-semibold transition-all flex items-center gap-2 shadow-lg text-lg"
+                >
+                  <RotateCcw size={24} />
+                  Resetar
+                </button>
+              </div>
+
+              {/* Info */}
+              <div className="bg-blue-900 bg-opacity-30 rounded-lg p-4 text-sm text-blue-200">
+                <div className="flex items-start gap-2">
+                  <Bell size={18} className="mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-semibold mb-1">Como funciona:</p>
+                    <ul className="space-y-1 text-xs">
+                      <li>• Timer padrão: 25 minutos (Pomodoro clássico)</li>
+                      <li>• Quando terminar, a sessão é salva automaticamente</li>
+                      <li>• Você receberá uma notificação quando completar</li>
+                      <li>• Faça pausas de 5-10 minutos entre sessões!</li>
+                    </ul>
                   </div>
-                ))}
+                </div>
+              </div>
+            </div>
 
-                {topics.filter(t => t.status === 'inProgress').length === 0 && (
+            {/* Recent Pomodoros */}
+            <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+              <h3 className="text-lg font-bold mb-4">Sessões Pomodoro Recentes</h3>
+              <div className="space-y-2">
+                {sessions
+                  .filter(s => s.notes === 'Sessão Pomodoro')
+                  .slice(0, 5)
+                  .map(session => {
+                    const topic = topics.find(t => t.id === parseInt(session.topicId));
+                    return (
+                      <div key={session.id} className="flex justify-between items-center p-3 bg-gray-700 rounded-lg">
+                        <div>
+                          <div className="font-medium">{topic?.name || 'Sem tópico'}</div>
+                          <div className="text-sm text-gray-400">{new Date(session.date).toLocaleDateString('pt-BR')}</div>
+                        </div>
+                        <div className="text-sm text-gray-300">{formatHours(session.duration)}</div>
+                      </div>
+                    );
+                  })}
+                {sessions.filter(s => s.notes === 'Sessão Pomodoro').length === 0 && (
                   <div className="text-center py-8 text-gray-500">
-                    Nenhuma meta em progresso
+                    Nenhuma sessão Pomodoro ainda
                   </div>
                 )}
               </div>
@@ -652,7 +1164,71 @@ Continue estudando e evoluindo! 🚀
           </div>
         )}
 
-        {/* Sessions Tab */}
+        {/* Achievements Tab */}
+        {activeTab === 'achievements' && (
+          <div className="space-y-6">
+            <div className="bg-gradient-to-r from-yellow-600 to-orange-600 rounded-xl p-6 shadow-lg">
+              <div className="flex items-center gap-3 mb-2">
+                <Trophy size={32} className="text-yellow-100" />
+                <div>
+                  <h2 className="text-2xl font-bold text-white">Suas Conquistas</h2>
+                  <p className="text-yellow-100">{achievements.length} de {ACHIEVEMENTS.length} desbloqueadas</p>
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <div className="w-full bg-yellow-900 bg-opacity-50 rounded-full h-4">
+                  <div
+                    className="bg-white h-4 rounded-full transition-all"
+                    style={{width: `${(achievements.length / ACHIEVEMENTS.length) * 100}%`}}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Unlocked Achievements */}
+            <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+              <h3 className="text-xl font-bold mb-4">✅ Desbloqueadas</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {ACHIEVEMENTS.filter(a => achievements.includes(a.id)).map(achievement => (
+                  <div key={achievement.id} className="bg-gradient-to-br from-yellow-600 to-orange-600 rounded-lg p-4 shadow-lg">
+                    <div className="text-5xl mb-3 text-center">{achievement.icon}</div>
+                    <div className="text-center">
+                      <div className="font-bold text-white text-lg mb-1">{achievement.name}</div>
+                      <div className="text-yellow-100 text-sm">{achievement.description}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {achievements.length === 0 && (
+                <div className="text-center py-12 text-gray-500">
+                  Continue estudando para desbloquear conquistas! 🏆
+                </div>
+              )}
+            </div>
+
+            {/* Locked Achievements */}
+            {ACHIEVEMENTS.filter(a => !achievements.includes(a.id)).length > 0 && (
+              <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+                <h3 className="text-xl font-bold mb-4">🔒 Bloqueadas</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {ACHIEVEMENTS.filter(a => !achievements.includes(a.id)).map(achievement => (
+                    <div key={achievement.id} className="bg-gray-700 rounded-lg p-4 opacity-60">
+                      <div className="text-5xl mb-3 text-center grayscale">{achievement.icon}</div>
+                      <div className="text-center">
+                        <div className="font-bold text-gray-300 text-lg mb-1">{achievement.name}</div>
+                        <div className="text-gray-400 text-sm">{achievement.description}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Sessions Tab - mantém o mesmo código anterior */}
         {activeTab === 'sessions' && (
           <div className="space-y-6">
             <button
@@ -822,7 +1398,7 @@ Continue estudando e evoluindo! 🚀
           </div>
         )}
 
-        {/* Topics Tab */}
+        {/* Topics Tab - mantém o mesmo */}
         {activeTab === 'topics' && (
           <div className="space-y-6">
             <button
@@ -973,7 +1549,7 @@ Continue estudando e evoluindo! 🚀
           </div>
         )}
 
-        {/* Analytics Tab */}
+        {/* Analytics Tab - mantém o mesmo */}
         {activeTab === 'analytics' && (
           <div className="space-y-6">
             {/* Weekly Chart */}
