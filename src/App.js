@@ -33,8 +33,6 @@ const ACHIEVEMENTS = [
   { id: 'exercises_50', name: 'Praticante', description: 'Resolva 50 exercícios', icon: '✍️', requirement: 50, type: 'exercises' },
   { id: 'exercises_100', name: 'Expert', description: 'Resolva 100 exercícios', icon: '🎓', requirement: 100, type: 'exercises' },
   { id: 'month_streak', name: 'Mês Perfeito', description: '30 dias consecutivos', icon: '🌟', requirement: 30, type: 'streak' },
-  { id: 'early_bird', name: 'Madrugador', description: 'Estude antes das 7h', icon: '🌅', requirement: 1, type: 'special' },
-  { id: 'night_owl', name: 'Coruja', description: 'Estude depois das 22h', icon: '🦉', requirement: 1, type: 'special' },
 ];
 
 export default function StudyTracker() {
@@ -173,13 +171,11 @@ export default function StudyTracker() {
           break;
         case 'special':
           // Check for special achievements
-          if (achievement.id === 'early_bird') {
             unlocked = sessions.some(s => {
               const hour = new Date(s.date + 'T06:00:00').getHours();
               return hour < 7;
             });
           }
-          if (achievement.id === 'night_owl') {
             unlocked = sessions.some(s => {
               const hour = new Date(s.date + 'T22:00:00').getHours();
               return hour >= 22;
